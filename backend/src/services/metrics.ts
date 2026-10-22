@@ -91,3 +91,64 @@ export const secretsRotationOutcome = new Gauge({
   help: "Secrets rotation (JWT_SECRET / SERVER_SIGNING_KEY) rollout outcome: 0=success, 1=transient_delay, 2=blocked",
   registers: [register],
 });
+
+export const streamProgressOutcome = new Gauge({
+  name: "stream_progress_outcome",
+  help: "Stream progress calculation outcome: 0=success, 1=transient_delay, 2=blocked",
+  registers: [register],
+});
+
+export const streamProgressClockSkewSeconds = new Gauge({
+  name: "stream_progress_clock_skew_seconds",
+  help: "System clock backwards skew delta in seconds during stream progress math",
+  registers: [register],
+});
+
+export const streamProgressClockSkewTotal = new Counter({
+  name: "stream_progress_clock_skew_total",
+  help: "Total number of system clock backwards events observed during stream progress math",
+  registers: [register],
+});
+
+export const authChallengeOutcome = new Gauge({
+  name: "auth_challenge_outcome",
+  help: "Authentication challenge verification outcome: 0=success, 1=transient_delay, 2=blocked",
+  registers: [register],
+});
+
+export const authChallengeDurationSeconds = new Gauge({
+  name: "auth_challenge_duration_seconds",
+  help: "Latency of the most recent authentication challenge verification in seconds",
+  registers: [register],
+});
+
+export const authChallengeWrongNetworkTotal = new Counter({
+  name: "auth_challenge_wrong_network_total",
+  help: "Total number of challenge verification failures caused by wallet signing for the wrong network",
+  registers: [register],
+});
+
+export const authChallengeReplayTotal = new Counter({
+  name: "auth_challenge_replay_total",
+  help: "Total number of challenge verification failures caused by reused nonces (replay attacks)",
+  registers: [register],
+});
+
+export const assetAllowlistOutcome = new Gauge({
+  name: "asset_allowlist_outcome",
+  help: "Asset allowlist configuration outcome: 0=success, 1=transient_delay, 2=blocked",
+  registers: [register],
+});
+
+export const assetAllowlistLatencyMs = new Gauge({
+  name: "asset_allowlist_latency_ms",
+  help: "Asset allowlist evaluation latency in milliseconds",
+  registers: [register],
+});
+
+export const assetAllowlistDuplicatesTotal = new Counter({
+  name: "asset_allowlist_duplicates_total",
+  help: "Total duplicate asset codes stripped from configuration",
+  registers: [register],
+});
+

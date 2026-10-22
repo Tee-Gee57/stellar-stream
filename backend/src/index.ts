@@ -496,9 +496,29 @@ app.get(
   },
 );
 
-app.get("/api/assets", (_req: Request, res: Response) => {
+app.get("/api/assets", (req: Request, res: Response) => {
+  const startPerf = Date.now();
+  const assets = getAllowedAssets();
+  const latencyMs = Math.max(0, Date.now() - startPerf);
+  const isNormalEmpty = assets.length === 0;
+
+  logger.info(
+    {
+      event: "asset_allowlist_query",
+      outcome: "success",
+      outcomeCode: 0,
+      latencyMs,
+      isNormalEmpty,
+      count: assets.length,
+      correlation_id: req.correlationId,
+      requestId: req.requestId,
+      streamId: typeof req.query.streamId === "string" ? req.query.streamId : undefined,
+    },
+    `Asset allowlist queried: ${assets.length} active allowed asset(s)`,
+  );
+
   res.json({
-    data: getAllowedAssets(),
+    data: assets,
   });
 });
 
@@ -1111,6 +1131,12 @@ app.get(
         (stream) => stream.sender.toLowerCase() === query.sender!.toLowerCase(),
       );
     }
+    if (query.recipient) {
+      data = data.filter(
+        (stream) =>
+          stream.recipient.toLowerCase() === query.recipient!.toLowerCase(),
+      );
+    }
     if (query.asset) {
       data = data.filter(
         (stream) =>
@@ -1282,6 +1308,12 @@ app.get(
     if (query.sender) {
       data = data.filter(
         (stream) => stream.sender.toLowerCase() === query.sender!.toLowerCase(),
+      );
+    }
+    if (query.recipient) {
+      data = data.filter(
+        (stream) =>
+          stream.recipient.toLowerCase() === query.recipient!.toLowerCase(),
       );
     }
     if (query.asset) {
@@ -2158,6 +2190,8 @@ app.get(
         outcome: signal.outcome,
         outcomeCode: signal.outcomeCode,
         detail: signal.detail,
+        isNormalEmpty: signal.isNormalEmpty,
+        latencyMs: signal.latencyMs,
         counts: signal.counts,
       });
     } catch (error: any) {

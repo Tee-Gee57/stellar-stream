@@ -6,6 +6,7 @@ import {
   recordRestoreOutcome,
   refreshRestoreMetrics,
 } from "./dbRestoreOutcome";
+import { evaluateAssetAllowlistConfig } from "./assetAllowlistOutcome";
 import { logger } from "../logger";
 
 const DB_PATH =
@@ -393,4 +394,79 @@ export function initDb(): void {
   // Incremental schema patches for columns added after the baseline.
   addColumnIfMissing(db, "streams", "cliff_seconds", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "stream_archive", "cliff_seconds", "INTEGER NOT NULL DEFAULT 0");
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS allowed_assets (
+      code TEXT PRIMARY KEY
+    );
+  `);
+
+  if (!isPostgres()) {
+    try {
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS streams_fts USING fts5(
+          stream_id UNINDEXED,
+          sender,
+          recipient,
+          asset_code,
+          content=streams,
+          content_rowid=rowid
+        );
+      `);
+    } catch {
+      // FTS table may already exist or not supported in environment
+    }
+  }
+
+  seedAllowedAssets(db);
+}
+
+function seedAllowedAssets(database: any): void {
+  if (process.env.NODE_ENV === "test") {
+    database.exec("DELETE FROM allowed_assets");
+  }
+  const countRow = database.prepare("SELECT COUNT(*) as count FROM allowed_assets").get() as { count?: number } | undefined;
+  const count = Number(countRow?.count ?? 0);
+  if (count === 0) {
+    const rawEnv = process.env.ALLOWED_ASSETS ?? "USDC,XLM";
+    const { validAssets } = evaluateAssetAllowlistConfig(rawEnv, { allowEmpty: false });
+    const insert = database.prepare("INSERT OR IGNORE INTO allowed_assets (code) VALUES (?)");
+    database.transaction((assets: string[]) => {
+      for (const asset of assets) {
+        insert.run(asset);
+      }
+    })(validAssets);
+  }
+}
+
+export function getAllowedAssets(): string[] {
+  try {
+    const database = getDb();
+    const rows = database.prepare("SELECT code FROM allowed_assets").all() as Array<{ code: string }>;
+    return rows.map((r) => r.code);
+  } catch {
+    return [];
+  }
+}
+
+export function addAllowedAsset(code: string): void {
+  const database = getDb();
+  database.prepare("INSERT OR IGNORE INTO allowed_assets (code) VALUES (?)").run(code.trim().toUpperCase());
+}
+
+export function removeAllowedAsset(code: string): void {
+  const database = getDb();
+  database.prepare("DELETE FROM allowed_assets WHERE code = ?").run(code.trim().toUpperCase());
+}
+
+export function searchStreamsFts(query: string): string[] {
+  try {
+    const database = getDb();
+    const rows = database.prepare(
+      `SELECT stream_id FROM streams_fts WHERE streams_fts MATCH ? ORDER BY rank`
+    ).all(query) as Array<{ stream_id: string }>;
+    return rows.map((row) => row.stream_id);
+  } catch {
+    return [];
+  }
 }

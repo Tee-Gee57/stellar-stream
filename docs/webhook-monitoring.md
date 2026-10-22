@@ -8,7 +8,7 @@ The monitoring signal is built from queue counts only. It does not select or pri
 
 | Surface | Purpose |
 | --- | --- |
-| `GET /api/webhooks/monitoring` | Auth-protected REST endpoint that returns `outcome`, `outcomeCode`, `detail`, and count-only queue state. |
+| `GET /api/webhooks/monitoring` | Auth-protected REST endpoint that returns `outcome`, `outcomeCode`, `detail`, `isNormalEmpty`, `latencyMs`, and count-only queue state. |
 | `/metrics` | Prometheus gauges for pending deliveries, due retries, scheduled retries, dead letters, and the coarse webhook outcome. |
 | `backend/src/services/webhookQueueStats.ts` | Count-only smoke-check helper for pending, due-now, scheduled retry, delivered, and dead-letter totals. |
 
@@ -30,8 +30,8 @@ If `WEBHOOK_DESTINATION_URL` contains query fields named like `token`, `secret`,
 
 | Outcome | Meaning | Owner action |
 | --- | --- | --- |
-| `success` | Nothing is pending or dead-lettered, or the destination is unconfigured and no work exists. | None. |
-| `transient_delay` | Deliveries are pending, with some due now or waiting for backoff, and the retry budget is intact. | None while the count falls. Watch that `pending == dueNow + scheduledRetries`. |
+| `success` | Nothing is pending or dead-lettered, or the destination is unconfigured and no work exists. When the queue is empty, `isNormalEmpty` is `true` so the empty case is clearly distinct from a failure. | None. |
+| `transient_delay` | Deliveries are pending, with some due now or waiting for backoff, and the retry budget is intact. A temporary `5xx` response is treated as a transient failure with a structured latency and retry signal. | None while the count falls. Watch that `pending == dueNow + scheduledRetries`. |
 | `blocked` | A delivery has exhausted retries, or work is queued while no destination URL is configured. | Fix the receiver or config, then requeue dead letters. |
 
 ## Clean environment reproduction

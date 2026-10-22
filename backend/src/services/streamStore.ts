@@ -25,8 +25,26 @@ import { resetStatsCache } from "./stats";
 import { resetStreamMetricsCache } from "./streamMetrics";
 import { logger } from "../logger";
 import { retryWithBackoff, SorobanSubmitError } from "../utils/sorobanRetry";
+import {
+  evaluateStreamProgressClockSkew,
+  classifyStreamProgressOutcome,
+  getLastStreamProgressSignal,
+  resetStreamProgressOutcome,
+  STREAM_PROGRESS_OUTCOME_CODES,
+  type StreamProgressOutcome,
+  type StreamProgressOutcomeSignal,
+} from "./streamProgressOutcome";
 
-export { SorobanSubmitError };
+export {
+  SorobanSubmitError,
+  evaluateStreamProgressClockSkew,
+  classifyStreamProgressOutcome,
+  getLastStreamProgressSignal,
+  resetStreamProgressOutcome,
+  STREAM_PROGRESS_OUTCOME_CODES,
+  type StreamProgressOutcome,
+  type StreamProgressOutcomeSignal,
+};
 
 export type StreamStatus = "scheduled" | "active" | "paused" | "completed" | "canceled";
 
@@ -399,28 +417,26 @@ async function fetchOnChainStreamRecord(
   return result;
 }
 
-function recordBackfilledCreatedEvent(stream: StreamRecord): void {
+function recordBackfilledCreatedEvent(stream: StreamRecord, dbHandle?: any): void {
   if (streamHasEvent(stream.id, "created")) {
     return;
   }
 
-  const db = getDb();
-  db.transaction(() => {
-    recordEventWithDb(
-      db,
-      stream.id,
-      "created",
-      stream.createdAt,
-      stream.sender,
-      stream.totalAmount,
-      {
-        recipient: stream.recipient,
-        assetCode: stream.assetCode,
-        durationSeconds: stream.durationSeconds,
-        source: "reconciliation",
-      },
-    );
-  })();
+  const db = dbHandle ?? getDb();
+  recordEventWithDb(
+    db,
+    stream.id,
+    "created",
+    stream.createdAt,
+    stream.sender,
+    stream.totalAmount,
+    {
+      recipient: stream.recipient,
+      assetCode: stream.assetCode,
+      durationSeconds: stream.durationSeconds,
+      source: "reconciliation",
+    },
+  );
 }
 
 function computeStatus(stream: StreamRecord, at: number): StreamStatus {
@@ -453,8 +469,15 @@ export function calculateProgress(
   stream: StreamRecord,
   at = nowInSeconds(),
 ): StreamProgress {
+  const startPerf = Date.now();
+  evaluateStreamProgressClockSkew(stream, at, startPerf);
+
   const effectiveAt =
-    stream.pausedAt !== undefined ? Math.min(at, stream.pausedAt) : at;
+    stream.canceledAt !== undefined
+      ? stream.canceledAt
+      : stream.pausedAt !== undefined
+      ? Math.min(at, stream.pausedAt)
+      : at;
 
   const elapsed = Math.max(0, Math.max(0, effectiveAt - stream.startAt) - stream.pausedDuration);
   const ratio = stream.durationSeconds <= 0 ? 1 : Math.min(1, elapsed / stream.durationSeconds);
@@ -697,18 +720,26 @@ export async function reconcileStream(streamId: string): Promise<StreamRecord> {
 
   try {
     const sourceAccount = await sorobanContext.sourceAccountPromise;
-    const onChainStream = await fetchOnChainStreamRecord(
-      sorobanContext.contract,
-      sourceAccount,
-      id,
-      true,
+    const onChainStream = await retryWithBackoff(
+      () =>
+        fetchOnChainStreamRecord(
+          sorobanContext.contract,
+          sourceAccount,
+          id,
+          true,
+        ),
+      2,
     );
 
     if (!onChainStream) {
       throw new Error("Stream not found on-chain");
     }
 
-    upsertStream(onChainStream);
+    const db = getDb();
+    db.transaction(() => {
+      upsertStream(onChainStream);
+      recordBackfilledCreatedEvent(onChainStream, db);
+    })();
 
     logger.info({ streamId }, "stream reconciled with on-chain state");
     return onChainStream;
@@ -726,10 +757,16 @@ export async function reconcileMissingStreams(): Promise<number> {
 
   try {
     const sourceAccount = await sorobanContext.sourceAccountPromise;
-    const nextId = await fetchNextOnChainStreamId(
-      sorobanContext.contract,
-      sourceAccount,
-    );
+    let nextId: number | null = null;
+    try {
+      nextId = await retryWithBackoff(
+        () => fetchNextOnChainStreamId(sorobanContext.contract, sourceAccount),
+        2,
+      );
+    } catch (err) {
+      logger.error({ err }, "failed to fetch next on-chain stream ID due to RPC outage");
+      return 0;
+    }
 
     if (nextId === null || nextId <= 1) {
       logger.info("no on-chain streams available to reconcile");
@@ -753,12 +790,18 @@ export async function reconcileMissingStreams(): Promise<number> {
     logger.warn({ missingCount: missingIds.length, missingIds }, "missing local streams detected");
 
     let repairedCount = 0;
+    const db = getDb();
+
     for (const missingId of missingIds) {
       try {
-        const stream = await fetchOnChainStreamRecord(
-          sorobanContext.contract,
-          sourceAccount,
-          missingId,
+        const stream = await retryWithBackoff(
+          () =>
+            fetchOnChainStreamRecord(
+              sorobanContext.contract,
+              sourceAccount,
+              missingId,
+            ),
+          2,
         );
 
         if (!stream) {
@@ -766,11 +809,19 @@ export async function reconcileMissingStreams(): Promise<number> {
           continue;
         }
 
-        upsertStream(stream);
-        recordBackfilledCreatedEvent(stream);
+        // Atomically commit stream and event in a single transaction.
+        // If event recording or upsert fails, the entire stream insertion rolls back cleanly.
+        db.transaction(() => {
+          upsertStream(stream);
+          recordBackfilledCreatedEvent(stream, db);
+        })();
+
         repairedCount += 1;
       } catch (err) {
-        logger.error({ err, streamId: missingId }, "failed to backfill missing stream");
+        logger.error({ err, streamId: missingId }, "failed to backfill missing stream due to RPC outage or error");
+        // On persistent RPC outage, abort remaining missing streams in this cycle to avoid hammering a down RPC provider,
+        // while preserving already committed streams.
+        break;
       }
     }
 
@@ -921,32 +972,40 @@ export async function estimateCreateStreamFee(input: StreamInput): Promise<Strea
 export function refreshStreamStatuses(): number {
   const db = getDb();
   const now = nowInSeconds();
+  const completedStreams: StreamRecord[] = [];
+  let completedCount = 0;
 
-  const toComplete = db.prepare(`
-    SELECT * FROM streams 
-    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
-      AND (start_at + duration_seconds) <= ?
-  `).all() as StreamRow[];
+  db.transaction(() => {
+    const toComplete = db.prepare(`
+      SELECT * FROM streams
+      WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
+        AND (start_at + duration_seconds) <= ?
+    `).all(now) as StreamRow[];
 
-  const result = db.prepare(`
-    UPDATE streams SET completed_at = ?
-    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
-      AND (start_at + duration_seconds) <= ?
-  `).run(now, now);
+    const result = db.prepare(`
+      UPDATE streams SET completed_at = ?
+      WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
+        AND (start_at + duration_seconds) <= ?
+    `).run(now, now);
+    completedCount = result.changes;
 
-  toComplete.forEach(row => {
-    const record = rowToRecord(row);
+    for (const row of toComplete) {
+      const record = rowToRecord(row);
+      record.completedAt = now;
 
-    record.completedAt = now;
+      if (!streamHasEvent(record.id, "completed")) {
+        recordEventWithDb(db, record.id, "completed", now);
+      }
 
-    if (!streamHasEvent(record.id, "completed")) {
-      recordEventWithDb(db, record.id, "completed", now);
+      completedStreams.push(record);
     }
+  })();
 
-    triggerWebhook("completed", record);
-  });
+  for (const stream of completedStreams) {
+    triggerWebhook("completed", stream);
+  }
 
-  return result.changes;
+  return completedCount;
 }
 
 export async function archiveOldStreams(): Promise<number> {

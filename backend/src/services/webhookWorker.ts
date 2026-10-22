@@ -8,6 +8,29 @@ import { logger } from "../logger";
 let isProcessing = false;
 let pollingInterval: NodeJS.Timeout | null = null;
 
+function sanitizeWebhookError(error: any): Record<string, unknown> {
+  if (!error) {
+    return { message: "Unknown error" };
+  }
+
+  const summary: Record<string, unknown> = {
+    name: error.name,
+    message: error.message || "Unknown error",
+    code: error.code,
+  };
+
+  const statusCode = error.response?.status ?? error.status;
+  if (typeof statusCode === "number") {
+    summary.statusCode = statusCode;
+  }
+
+  if (typeof error.cause === "string") {
+    summary.cause = error.cause;
+  }
+
+  return summary;
+}
+
 export const processWebhookQueue = async () => {
   if (isProcessing) return;
   isProcessing = true;
@@ -41,6 +64,7 @@ export const processWebhookQueue = async () => {
     for (const delivery of pendingDeliveries) {
       const { id, event, payload, attempt, max_attempts } = delivery;
       const parsedPayload = JSON.parse(payload);
+      const startTime = Date.now();
 
       let success = false;
       let errorMsg = null;
@@ -62,18 +86,62 @@ export const processWebhookQueue = async () => {
           headers,
           validateStatus: () => true,
         });
+        const latencyMs = Math.max(0, Date.now() - startTime);
+
         if (response.status >= 200 && response.status < 300) {
           success = true;
+          logger.info(
+            {
+              event,
+              deliveryId: id,
+              streamId: delivery.stream_id,
+              attempt: attempt + 1,
+              statusCode: response.status,
+              outcome: "success",
+              outcomeCode: 0,
+              latencyMs,
+              isNormalEmpty: false,
+            },
+            "webhook delivery succeeded",
+          );
         } else {
           errorMsg = `HTTP ${response.status}`;
-          logger.error(
-            { deliveryId: id, event, status: response.status, attempt: attempt + 1 },
+          logger.warn(
+            {
+              event,
+              deliveryId: id,
+              streamId: delivery.stream_id,
+              statusCode: response.status,
+              attempt: attempt + 1,
+              latencyMs,
+              outcome: response.status >= 500 && response.status < 600 ? "transient_delay" : "blocked",
+              outcomeCode: response.status >= 500 && response.status < 600 ? 1 : 2,
+              isNormalEmpty: false,
+              detail: response.status >= 500 && response.status < 600
+                ? "Temporary 5xx response from the webhook endpoint; retry scheduled."
+                : `Webhook endpoint returned HTTP ${response.status}; retry scheduled if attempts remain.`,
+            },
             "webhook delivery attempt failed",
           );
         }
       } catch (error: any) {
+        const latencyMs = Math.max(0, Date.now() - startTime);
         errorMsg = error.message || "Unknown error";
-        logger.error({ err: error, deliveryId: id, attempt: attempt + 1 }, "webhook delivery attempt failed");
+        logger.warn(
+          {
+            event,
+            deliveryId: id,
+            streamId: delivery.stream_id,
+            attempt: attempt + 1,
+            latencyMs,
+            outcome: "transient_delay",
+            outcomeCode: 1,
+            isNormalEmpty: false,
+            detail: "Webhook endpoint timed out or was unreachable; retry scheduled.",
+            error: sanitizeWebhookError(error),
+          },
+          "webhook delivery attempt failed",
+        );
       }
 
       const updateNow = Math.floor(Date.now() / 1000);
@@ -114,7 +182,7 @@ export const processWebhookQueue = async () => {
       }
     }
   } catch (err: any) {
-    logger.error({ err }, "error processing webhook queue");
+    logger.error({ error: sanitizeWebhookError(err) }, "error processing webhook queue");
   } finally {
     isProcessing = false;
   }

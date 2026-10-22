@@ -631,7 +631,20 @@ export const swaggerDocument = {
     "/api/assets": {
       get: {
         summary: "List allowed assets",
-        description: "Returns the normalized list of allowed asset codes.",
+        description:
+          "Returns the normalized and deduplicated list of active allowed asset codes for payment streams. " +
+          "Supports linking telemetry logs to a stream ID via the streamId query parameter.",
+        parameters: [
+          {
+            name: "streamId",
+            in: "query",
+            required: false,
+            description: "Optional stream ID to correlate log signals with a specific stream.",
+            schema: {
+              type: "string",
+            },
+          },
+        ],
         responses: {
           "200": {
             description: "Allowed assets list.",
@@ -1271,11 +1284,26 @@ export const swaggerDocument = {
             },
           },
           "400": {
-            description: "Invalid request.",
+            description: "Invalid request (invalid Stellar account ID format or checksum, or invalid query parameter).",
             content: {
               "application/json": {
                 schema: {
                   $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+          "503": {
+            description: "Database query timeout error when transient database locks persist.",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+                example: {
+                  error: "Database query timed out while fetching recipient streams.",
+                  statusCode: 503,
+                  code: "DATABASE_TIMEOUT",
                 },
               },
             },
@@ -1643,10 +1671,23 @@ export const swaggerDocument = {
             },
           },
           "400": {
-            description: "Invalid Stellar address format or query parameter.",
+            description: "Invalid Stellar address format or checksum, or invalid query parameter.",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          "503": {
+            description: "Database query timeout error when transient database locks persist.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: {
+                  error: "Database query timed out while fetching recipient streams.",
+                  statusCode: 503,
+                  code: "DATABASE_TIMEOUT",
+                },
               },
             },
           },
