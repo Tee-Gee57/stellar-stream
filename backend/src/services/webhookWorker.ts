@@ -46,20 +46,31 @@ export const processWebhookQueue = async () => {
       let errorMsg = null;
 
       try {
-        const timestamp = new Date().toISOString();
         const body = {
           event,
           payload: parsedPayload,
-          timestamp,
+          timestamp: new Date(Number(delivery.created_at) * 1000).toISOString(),
         };
         const bodyString = JSON.stringify(body);
         const headers = getWebhookHeaders(
           bodyString,
           process.env.WEBHOOK_SIGNING_SECRET,
+          String(id),
         );
 
-        await axios.post(url, bodyString, { headers });
-        success = true;
+        const response = await axios.post(url, bodyString, {
+          headers,
+          validateStatus: () => true,
+        });
+        if (response.status >= 200 && response.status < 300) {
+          success = true;
+        } else {
+          errorMsg = `HTTP ${response.status}`;
+          logger.error(
+            { deliveryId: id, event, status: response.status, attempt: attempt + 1 },
+            "webhook delivery attempt failed",
+          );
+        }
       } catch (error: any) {
         errorMsg = error.message || "Unknown error";
         logger.error({ err: error, deliveryId: id, attempt: attempt + 1 }, "webhook delivery attempt failed");
@@ -70,7 +81,7 @@ export const processWebhookQueue = async () => {
       if (success) {
         // Mark as success
         db.prepare(
-          `UPDATE webhook_deliveries SET status = 'success', last_attempt_at = ? WHERE id = ?`
+          `UPDATE webhook_deliveries SET status = 'success', last_attempt_at = ?, next_retry_at = NULL WHERE id = ?`
         ).run(updateNow, id);
         logger.info({ deliveryId: id, event }, "webhook delivery succeeded");
       } else {

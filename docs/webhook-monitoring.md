@@ -87,3 +87,10 @@ Recovery:
 Rollback step:
 
 - If the receiver cannot be made healthy, keep the service running but disable the webhook destination for new deployments, preserve existing dead letters, and restore the last known working receiver configuration before requeueing.
+
+## Delivery and retry semantics
+
+- Any `2xx` response marks the delivery `success`. A successful delivery does not increase `attempt`, and `next_retry_at` is cleared because no further retry is scheduled.
+- Any non-`2xx` HTTP response, including a temporary `5xx`, and any transport error or timeout count as one failed attempt. The delivery remains pending with the configured backoff until it succeeds or exhausts `max_attempts`, after which it is moved to dead-letter storage. A timeout is ambiguous: the receiver may have processed the request even though this service did not receive its response.
+- Retries of the same queue row send the same `Idempotency-Key` (`stellar-stream-<delivery id>`) and the same request body. Receivers should retain processed keys and return the original success for a repeated key to avoid applying a timed-out request twice. A manually requeued dead letter is a new queue row and therefore has a new key.
+- `attempt` counts failed attempts, not total requests. Delivery rows and their keys are scoped to this service's database.
